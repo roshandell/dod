@@ -1,11 +1,10 @@
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users } from "../drizzle/schema";
+import { InsertUser, users, subscriptionPlans, userSubscriptions, payments, aiUsage } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
-// Lazily create the drizzle instance so local tooling can run without a DB.
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
@@ -85,8 +84,104 @@ export async function getUserByOpenId(openId: string) {
   }
 
   const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
-
   return result.length > 0 ? result[0] : undefined;
 }
 
-// TODO: add feature queries here as your schema grows.
+export async function getSubscriptionPlans() {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db.select().from(subscriptionPlans).where(eq(subscriptionPlans.isActive, true));
+}
+
+export async function getPlanById(planId: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const result = await db.select().from(subscriptionPlans).where(eq(subscriptionPlans.id, planId)).limit(1);
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function getUserSubscription(userId: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const result = await db
+    .select()
+    .from(userSubscriptions)
+    .where(and(eq(userSubscriptions.userId, userId), eq(userSubscriptions.isActive, true)))
+    .limit(1);
+
+  if (result.length === 0) return null;
+
+  const sub = result[0];
+  const plan = await getPlanById(sub.planId);
+  
+  return { ...sub, plan };
+}
+
+export async function createPayment(userId: number, planId: number, amount: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const result = await db.insert(payments).values({
+    userId,
+    amount,
+    currency: "USD",
+    status: "pending",
+  });
+
+  return result;
+}
+
+export async function updatePaymentStatus(paymentId: number, status: string, cryptomusInvoiceId?: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db.update(payments).set({
+    status: status as any,
+    cryptomusInvoiceId,
+    updatedAt: new Date(),
+  }).where(eq(payments.id, paymentId));
+}
+
+export async function getAIUsage(userId: number, month: string) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const result = await db
+    .select()
+    .from(aiUsage)
+    .where(and(eq(aiUsage.userId, userId), eq(aiUsage.month, month)))
+    .limit(1);
+
+  return result.length > 0 ? result[0] : null;
+}
+
+export async function incrementAIUsage(userId: number, provider: string, month: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const existing = await getAIUsage(userId, month);
+  
+  if (existing) {
+    await db.update(aiUsage).set({
+      requestCount: existing.requestCount + 1,
+      updatedAt: new Date(),
+    }).where(eq(aiUsage.id, existing.id));
+  } else {
+    await db.insert(aiUsage).values({
+      userId,
+      provider: provider as any,
+      requestCount: 1,
+      month,
+    });
+  }
+}
+
+export async function getUserPayments(userId: number) {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db.select().from(payments).where(eq(payments.userId, userId));
+}
